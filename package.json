@@ -1,0 +1,27 @@
+{
+  "name": "ctrm",
+  "version": "1.0.0",
+  "main": "dist/lib/truth_management_system.js",
+  "bin": {
+    "ctrm": "dist/bin/ctrm-cli.js"
+  },
+  "scripts": {
+    "start": "tsc && npm link",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.22.3",
+    "better-sqlite3": "^12.5.0",
+    "commander": "^14.0.2",
+    "lancedb": "^0.0.1"
+  }
+}

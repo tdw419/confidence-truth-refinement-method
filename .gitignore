@@ -1,0 +1,32 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm/
+
+# TypeScript
+*.tsbuildinfo
+
+# IDEs and other ignored files
+.vscode/
+.idea/
+.DS_Store
+*.log
+*.tmp
+*.bak
+temp_*.txt
+
+# Build artifacts
+dist/
+
+# CTRM specific
+.ctrm/
+my-test-project/
+my-verify-project/
+my-meta-project/
+my-vector-isa-project/
+
+# Gemini related
+.gemini/

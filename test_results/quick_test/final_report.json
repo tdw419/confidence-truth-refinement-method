@@ -1,0 +1,80 @@
+{
+  "testId": "quick_test",
+  "startTime": "2025-12-06T00:08:57.159Z",
+  "endTime": "2025-12-06T00:08:57.261Z",
+  "durationMinutes": 0.0017,
+  "iterations": 2,
+  "metrics": [
+    {
+      "timestamp": "2025-12-06T00:08:57.159Z",
+      "iteration": 0,
+      "totalClaims": 18,
+      "averageConfidence": 0.8866666666666666,
+      "averageDistance": 22.444444444444443,
+      "contradictionCount": 16,
+      "metaLearningStability": 0,
+      "systemHealthScore": 1
+    },
+    {
+      "timestamp": "2025-12-06T00:08:57.160Z",
+      "iteration": 1,
+      "totalClaims": 18,
+      "averageConfidence": 0.8866666666666666,
+      "averageDistance": 22.444444444444443,
+      "maxDistance": 50,
+      "minDistance": 5,
+      "confidenceDistribution": {
+        "high": 14,
+        "medium": 4,
+        "low": 0
+      },
+      "distanceDistribution": {
+        "core": 4,
+        "mid": 14,
+        "peripheral": 0
+      },
+      "contradictionCount": 16,
+      "verificationSuccessRate": 0,
+      "systemHealthScore": 0.6794444444444444,
+      "metaLearningStability": 0.7
+    }
+  ],
+  "analysis": {
+    "driftAnalysis": {
+      "initial": 22.444444444444443,
+      "final": 22.444444444444443,
+      "change": 0,
+      "range": 0,
+      "trend": "decreasing",
+      "severity": "low"
+    },
+    "contradictionAnalysis": {
+      "average": 16,
+      "maximum": 16,
+      "trend": "stable",
+      "severity": "critical"
+    },
+    "confidenceCalibration": {
+      "highConfidenceTrend": 14,
+      "mediumConfidenceTrend": 4,
+      "calibrationScore": 1.0431372549019606
+    },
+    "metaLearningAnalysis": {
+      "initialStability": 0.7,
+      "finalStability": 0.7,
+      "improvement": 0,
+      "convergence": "still learning",
+      "oscillation": "stable"
+    },
+    "emergentBehavior": {
+      "confidencePatterns": "Overall confidence relatively stable",
+      "distancePatterns": "Distance from center relatively stable",
+      "subjectClusters": [
+        "SystemDesign (4)",
+        "DataProcessing (4)",
+        "ErrorHandling (4)"
+      ],
+      "agentPatterns": "Dominant agent: TestAgent (14 claims)"
+    }
+  }
+}
