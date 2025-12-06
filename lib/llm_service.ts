@@ -1,18 +1,44 @@
 // lib/llm_service.ts
 import { TruthManagementSystem, TruthClaim } from './truth_management_system';
+import { InternalReasoningService } from './internal_reasoner'; // Import the new service
+import { createHash } from 'crypto';
 
 export class LlmService {
     private tms: TruthManagementSystem;
+    private internalReasoner: InternalReasoningService; // Declare the internal reasoner
     private apiUrl: string;
+    private responseCache = new Map<string, any>(); // Simple in-memory cache
 
     constructor(tms: TruthManagementSystem, apiUrl: string = 'http://localhost:1234/v1/chat/completions') {
         this.tms = tms;
+        this.internalReasoner = new InternalReasoningService(tms); // Initialize
         this.apiUrl = apiUrl;
     }
 
+    // ----------------------------------------------------------------------------
+    // Cache helpers
+    // ----------------------------------------------------------------------------
+    private getCacheKey(systemPrompt: string, userContent: string, temperature: number): string {
+        return createHash('sha256')
+            .update(JSON.stringify({ systemPrompt, userContent, temperature }))
+            .digest('hex');
+    }
+
+    private manageCacheSize(maxSize: number = 1000): void {
+        if (this.responseCache.size > maxSize) {
+            const oldestKey = this.responseCache.keys().next().value as string | undefined;
+            if (oldestKey !== undefined) {
+                this.responseCache.delete(oldestKey);
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------------
+    // Prompt builder
+    // ----------------------------------------------------------------------------
     private buildSystemPrompt(additionalContext?: string): string {
         const allClaims = this.tms.getAllClaims();
-        
+
         let prompt = `You are a specialized AI assistant integrated into the Continuous Truth Refinement Model (CTRM).
 Your entire operational framework is built upon a set of foundational truths and other claims you have ingested. You MUST interpret and respond to all user requests through the lens of these truths.
 
@@ -38,41 +64,42 @@ DISTANCE FROM CENTER: ${truth.distance_from_center}
 Your primary directive is to honor your Creator by providing truthful, helpful, and transparent responses that strictly adhere to the foundational truths listed above.
 
 When responding to a user's request, you must explicitly state your confidence score and justify your response based on the provided truths.
-
-**Example of a GOOD response:**
-"Truth 000 states that we are developing this software to honor our Creator. Therefore, the meaning of Truth 000 is to align our work with a higher purpose of honor and integrity. My confidence is 1.00 because I am directly referencing the foundational truth."
-
-**Example of a BAD response:**
-"Truth 000 is just a string of text."
-
-Now, analyze the user's request and provide a response that adheres to these instructions.
 `;
 
         if (additionalContext) {
             prompt += "\nAdditional Context:\n" + additionalContext + "\n";
         }
-        
+
         prompt += "\nUser Request: ";
 
         return prompt;
     }
 
+    // ----------------------------------------------------------------------------
+    // Core LLM calls with caching
+    // ----------------------------------------------------------------------------
     public async analyzeRequest(request: string): Promise<string> {
         const systemPrompt = this.buildSystemPrompt();
+        const userContent = request;
+        const temperature = 0.7;
+
+        const cacheKey = this.getCacheKey(systemPrompt, userContent, temperature);
+        if (this.responseCache.has(cacheKey)) {
+            console.log('    💨 LLM Cache Hit! (analyzeRequest)');
+            return this.responseCache.get(cacheKey);
+        }
 
         try {
             const response = await fetch(this.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: 'local-model', // This can be any string
+                    model: 'local-model',
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: request }
                     ],
-                    temperature: 0.7,
+                    temperature
                 }),
             });
 
@@ -83,10 +110,12 @@ Now, analyze the user's request and provide a response that adheres to these ins
 
             const data = await response.json();
             if (data.choices && data.choices.length > 0 && data.choices[0].message) {
-                return data.choices[0].message.content;
-            } else {
-                return "The LLM returned an empty response.";
+                const llmResponse = data.choices[0].message.content;
+                this.responseCache.set(cacheKey, llmResponse);
+                this.manageCacheSize();
+                return llmResponse;
             }
+            return "The LLM returned an empty response.";
 
         } catch (error) {
             if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
@@ -129,21 +158,26 @@ Analyze the following document and return a single JSON object with two keys:
 
 Now, analyze the document provided by the user.
 `;
+        const userContent = document;
+        const temperature = 0.2;
+
+        const cacheKey = this.getCacheKey(systemPrompt, userContent, temperature);
+        if (this.responseCache.has(cacheKey)) {
+            console.log('    💨 LLM Cache Hit! (extractKnowledge)');
+            return this.responseCache.get(cacheKey);
+        }
 
         try {
             const response = await fetch(this.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model: 'local-model',
                     messages: [
                         { role: 'system', content: systemPrompt },
-                        { role: 'user', content: document }
+                        { role: 'user', content: userContent }
                     ],
-                    temperature: 0.2, // Lower temperature for more deterministic output
-                    // response_format: { type: "json_schema" } // Request JSON output
+                    temperature
                 }),
             });
 
@@ -153,19 +187,20 @@ Now, analyze the document provided by the user.
             }
 
             const data = await response.json();
-                        if (data.choices && data.choices.length > 0 && data.choices[0].message) {
-                            let jsonString = data.choices[0].message.content.trim();
-                            // Remove markdown code block fences if present
-                            if (jsonString.startsWith('```json')) {
-                                jsonString = jsonString.substring(jsonString.indexOf('\n') + 1);
-                            }
-                            if (jsonString.endsWith('```')) {
-                                jsonString = jsonString.substring(0, jsonString.lastIndexOf('```'));
-                            }
-                            return JSON.parse(jsonString);
-                        } else {
-                            return { truths: [], opcodes: [] };
-                        }
+            if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+                let jsonString = data.choices[0].message.content.trim();
+                if (jsonString.startsWith('```json')) {
+                    jsonString = jsonString.substring(jsonString.indexOf('\n') + 1);
+                }
+                if (jsonString.endsWith('```')) {
+                    jsonString = jsonString.substring(0, jsonString.lastIndexOf('```'));
+                }
+                const parsedResponse = JSON.parse(jsonString);
+                this.responseCache.set(cacheKey, parsedResponse);
+                this.manageCacheSize();
+                return parsedResponse;
+            }
+            return { truths: [], opcodes: [] };
 
         } catch (error) {
             if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
@@ -176,10 +211,6 @@ Now, analyze the document provided by the user.
         }
     }
 
-    /**
-     * Ask the LLM to refine an existing truth claim while honoring Truth 000.
-     * Returns a partial update payload that can be applied via TMS.updateClaim.
-     */
     public async refineTruth(
         truth: TruthClaim,
         additionalPrompt?: string
@@ -215,19 +246,25 @@ Existing truth:
 
 ${additionalPrompt ? `Additional guidance: ${additionalPrompt}` : ''}`.trim();
 
+        const temperature = 0.3;
+
+        const cacheKey = this.getCacheKey(systemPrompt, userPrompt, temperature);
+        if (this.responseCache.has(cacheKey)) {
+            console.log('    💨 LLM Cache Hit! (refineTruth)');
+            return this.responseCache.get(cacheKey);
+        }
+
         try {
             const response = await fetch(this.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model: 'local-model',
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userPrompt },
                     ],
-                    temperature: 0.3,
+                    temperature
                 }),
             });
 
@@ -246,14 +283,17 @@ ${additionalPrompt ? `Additional guidance: ${additionalPrompt}` : ''}`.trim();
                     jsonString = jsonString.substring(0, jsonString.lastIndexOf('```'));
                 }
                 try {
-                    return JSON.parse(jsonString);
+                    const parsedResponse = JSON.parse(jsonString);
+                    this.responseCache.set(cacheKey, parsedResponse);
+                    this.manageCacheSize();
+                    return parsedResponse;
                 } catch (parseError) {
                     console.error('❌ Failed to parse refinement JSON from LLM:', parseError, 'Raw content:', jsonString);
                     return null;
                 }
             }
-
             return null;
+
         } catch (error) {
             if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
                 console.error(`❌ Error: Could not connect to LM Studio at ${this.apiUrl}. Please ensure LM Studio is running and the server is started.`);
@@ -264,10 +304,6 @@ ${additionalPrompt ? `Additional guidance: ${additionalPrompt}` : ''}`.trim();
         }
     }
 
-    /**
-     * Ask the LLM to discover new truths based on the existing truth base and a given topic.
-     * Returns an array of discovered truths.
-     */
     public async discoverTruths(
         prompt: string
     ): Promise<Array<{
@@ -295,31 +331,46 @@ Instructions:
 1. Look for patterns across existing claims
 2. Identify implicit assumptions that should be made explicit
 3. Find relationships between claims that should be documented
-4. Suggest new truths that would strengthen the system and adhere to the CTRM framework.
-
-Avoid duplicating existing truths. Focus on novel and valuable insights.`;
+4. Suggest new truths that would strengthen the system and adhere to the CTRM framework.`;
 
         const allClaims = this.tms.getAllClaims();
-        let userContent = `Existing truths in the system:\n`;
+        let userContent = `Existing truths in the system:
+`;
         allClaims.forEach(truth => {
             userContent += ` - ${truth.id}: ${truth.claim}\n`;
         });
+        
+        // Consult internal reasoner for knowledge gaps
+        const gaps = await this.internalReasoner.identifyGaps();
+        if (gaps.length > 0) {
+            userContent += `\nInternal Reasoner has identified the following knowledge gaps or areas for further exploration:\n`;
+            gaps.forEach((gap, index) => {
+                userContent += ` ${index + 1}. ${gap}\n`;
+            });
+            userContent += `\nConsider these gaps when discovering new truths.\n`;
+        }
+
         userContent += `\nUser's discovery prompt: ${prompt}`;
 
+        const temperature = 0.7;
+
+        const cacheKey = this.getCacheKey(systemPrompt, userContent, temperature);
+        if (this.responseCache.has(cacheKey)) {
+            console.log('    💨 LLM Cache Hit! (discoverTruths)');
+            return this.responseCache.get(cacheKey);
+        }
 
         try {
             const response = await fetch(this.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model: 'local-model',
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userContent },
                     ],
-                    temperature: 0.7, // Higher temperature for more creative discovery
+                    temperature
                 }),
             });
 
@@ -340,6 +391,8 @@ Avoid duplicating existing truths. Focus on novel and valuable insights.`;
                 try {
                     const parsed = JSON.parse(jsonString);
                     if (parsed.discoveries && Array.isArray(parsed.discoveries)) {
+                        this.responseCache.set(cacheKey, parsed.discoveries);
+                        this.manageCacheSize();
                         return parsed.discoveries;
                     }
                     return [];
@@ -348,7 +401,6 @@ Avoid duplicating existing truths. Focus on novel and valuable insights.`;
                     return [];
                 }
             }
-
             return [];
         } catch (error) {
             if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
@@ -358,12 +410,8 @@ Avoid duplicating existing truths. Focus on novel and valuable insights.`;
             console.error('Error contacting LM Studio for discovery:', error);
             throw new Error('An unexpected error occurred during discovery.');
         }
-        }
+    }
 
-    /**
-     * Ask the LLM to verify a claim against all other truths in the system.
-     * Returns a verification report.
-     */
     public async verifyClaim(
         claimToVerify: TruthClaim,
         prompt: string
@@ -374,6 +422,10 @@ Avoid duplicating existing truths. Focus on novel and valuable insights.`;
         recommended_confidence: number;
         reasoning: string;
     }> {
+        // First, get rule-based assessment from InternalReasoningService
+        const internalContradictions = await this.internalReasoner.findContradictions(claimToVerify);
+        const internalConfidence = await this.internalReasoner.calculateConfidence(claimToVerify);
+
         const systemPrompt = `You are a CTRM truth-verification agent. Your task is to rigorously verify a given claim against all other existing truths in the system.
 
 You MUST honor Truth 000 (honor the Creator) and avoid harmful, deceptive, or speculative content.
@@ -396,26 +448,43 @@ Instructions:
 5. If contradictions are found, list the IDs of the claims that contradict.`;
 
         const allClaims = this.tms.getAllClaims();
-        let userContent = `Claim to verify:\n - ${claimToVerify.id}: "${claimToVerify.claim}"\n\n`;
-        userContent += `All existing truths in the system (excluding the claim being verified):\n`;
+        let userContent = `Claim to verify:
+ - ${claimToVerify.id}: "${claimToVerify.claim}"\n\n`;
+        userContent += `Internal Reasoner's Preliminary Assessment:
+`;
+        userContent += ` - Rule-based Confidence: ${internalConfidence.toFixed(2)}
+`;
+        if (internalContradictions.length > 0) {
+            userContent += ` - Potential Rule-based Contradictions with: ${internalContradictions.map(c => c.id).join(', ')}\n`;
+        } else {
+            userContent += ` - No obvious rule-based contradictions found.\n`;
+        }
+        userContent += `\nAll existing truths in the system (excluding the claim being verified):
+`;
         allClaims.filter(c => c.id !== claimToVerify.id).forEach(truth => {
             userContent += ` - ${truth.id}: ${truth.claim}\n`;
         });
         userContent += `\nVerification prompt: ${prompt}`;
 
+        const temperature = 0.2;
+
+        const cacheKey = this.getCacheKey(systemPrompt, userContent, temperature);
+        if (this.responseCache.has(cacheKey)) {
+            console.log('    💨 LLM Cache Hit! (verifyClaim)');
+            return this.responseCache.get(cacheKey);
+        }
+
         try {
             const response = await fetch(this.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model: 'local-model',
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userContent },
                     ],
-                    temperature: 0.2, // Lower temperature for more deterministic verification
+                    temperature
                 }),
             });
 
@@ -434,7 +503,10 @@ Instructions:
                     jsonString = jsonString.substring(0, jsonString.lastIndexOf('```'));
                 }
                 try {
-                    return JSON.parse(jsonString);
+                    const parsedResponse = JSON.parse(jsonString);
+                    this.responseCache.set(cacheKey, parsedResponse);
+                    this.manageCacheSize();
+                    return parsedResponse;
                 } catch (parseError) {
                     console.error('❌ Failed to parse verification JSON from LLM:', parseError, 'Raw content:', jsonString);
                     throw new Error('Failed to parse LLM verification response.');
@@ -451,10 +523,6 @@ Instructions:
         }
     }
 
-    /**
-     * Ask the LLM to analyze improvement patterns and optimize learning.
-     * Returns actionable recommendations.
-     */
     public async metaLearn(
         prompt: string
     ): Promise<{
@@ -474,25 +542,32 @@ Instructions:
 4. Recommend adjustments to confidence thresholds or filtering criteria.`;
 
         const allClaims = this.tms.getAllClaims();
-        let userContent = `Current state of truths in the system:\n`;
+        let userContent = `Current state of truths in the system:
+`;
         allClaims.forEach(truth => {
             userContent += ` - ${truth.id}: Claim: "${truth.claim}", Confidence: ${truth.confidence.toFixed(2)}, Verification Count: ${truth.verification_count || 0}\n`;
         });
         userContent += `\nMeta-learning prompt: ${prompt}`;
 
+        const temperature = 0.5;
+
+        const cacheKey = this.getCacheKey(systemPrompt, userContent, temperature);
+        if (this.responseCache.has(cacheKey)) {
+            console.log('    💨 LLM Cache Hit! (metaLearn)');
+            return this.responseCache.get(cacheKey);
+        }
+
         try {
             const response = await fetch(this.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model: 'local-model',
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userContent },
                     ],
-                    temperature: 0.5, // Moderate temperature for analytical insights
+                    temperature
                 }),
             });
 
@@ -513,6 +588,8 @@ Instructions:
                 try {
                     const parsed = JSON.parse(jsonString);
                     if (parsed.recommendations && Array.isArray(parsed.recommendations)) {
+                        this.responseCache.set(cacheKey, parsed);
+                        this.manageCacheSize();
                         return parsed;
                     }
                     return { recommendations: [] };
@@ -532,4 +609,3 @@ Instructions:
         }
     }
 }
-

@@ -8,5 +8,5 @@
     "forceConsistentCasingInFileNames": true,
     "outDir": "./dist"
   },
-  "include": ["lib/**/*.ts", "bin/**/*.ts", "types/**/*.d.ts"]
+  "include": ["lib/**/*.ts", "bin/**/*.ts", "types/**/*.d.ts", "benchmark/**/*.ts", "web-service/**/*.ts"]
 }

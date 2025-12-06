@@ -5,6 +5,9 @@ import * as path from 'path';
 import { TruthManagementSystem, TruthClaim } from '../lib/truth_management_system'; // Import TMS and TruthClaim
 import { LlmService } from '../lib/llm_service'; // Import LlmService
 import { VectorExecutor, VectorProgram } from '../lib/vector_executor'; // Import VectorExecutor
+import { InternalLLM } from '../lib/internal_llm'; // Import InternalLLM
+import { DualLlmOrchestra } from '../lib/dual_llm_orchestra'; // Import DualLlmOrchestra
+import { GeminiCliService } from '../lib/gemini_cli_service'; // Import GeminiCliService
 
 const program = new Command();
 
@@ -131,16 +134,9 @@ program
 program
   .command('analyze <request>')
   .description('Analyze a request using CTRM and a local LLM via LM Studio')
-  .action(async (request) => {
-    const currentDir = process.cwd();
-    const ctrmDir = path.join(currentDir, '.ctrm');
-    const dbPath = path.join(ctrmDir, 'truths.db');
-    const configPath = path.join(ctrmDir, 'config.json');
-
-    if (!fs.existsSync(ctrmDir) || !fs.existsSync(dbPath) || !fs.existsSync(configPath)) {
-      console.error(`❌ Error: Not a CTRM project. Run 'ctrm init <projectName>' first or run this command from within a CTRM project directory.`);
-      process.exit(1);
-    }
+  .option('-p, --project-path <path>', 'Specify the root path of the CTRM project to manage')
+  .action(async (request, options) => {
+    const dbPath = getDbPath(options.projectPath);
 
     console.log('════════════════════════════════════════════════════════════');
     console.log(`🧠 Analyzing Request with CTRM: "${request}"`);
@@ -160,8 +156,9 @@ program
     console.log('\n════════════════════════════════════════════════════════════\n');
   });
 
-async function _ingestDocument(filePath: string, tms: TruthManagementSystem, llmService: LlmService): Promise<void> {
-    const fullPath = path.resolve(process.cwd(), filePath);
+async function _ingestDocument(filePath: string, tms: TruthManagementSystem, llmService: LlmService, projectPath?: string): Promise<void> {
+    const baseDir = projectPath ? path.resolve(projectPath) : process.cwd();
+    const fullPath = path.resolve(baseDir, filePath);
 
     if (!fs.existsSync(fullPath)) {
         console.error(`❌ Error: File not found at '${fullPath}'`);
@@ -226,26 +223,21 @@ async function _ingestDocument(filePath: string, tms: TruthManagementSystem, llm
 program
     .command('ingest <filePath>')
     .description('Ingest a document and extract truths and opcodes')
-    .action(async (filePath) => {
-        const dbPath = getDbPath();
+    .option('-p, --project-path <path>', 'Specify the root path of the CTRM project to manage')
+    .action(async (filePath, options) => {
+        const dbPath = getDbPath(options.projectPath);
         const tms = new TruthManagementSystem(dbPath);
         const llmService = new LlmService(tms);
-        await _ingestDocument(filePath, tms, llmService);
+        await _ingestDocument(filePath, tms, llmService, options.projectPath);
     });
 
 program
     .command('refine <truthId>')
     .description('Refine an existing truth using the LLM')
     .option('-p, --prompt <prompt>', 'Additional prompt for refinement')
+    .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
     .action(async (truthId, options) => {
-        const currentDir = process.cwd();
-        const ctrmDir = path.join(currentDir, '.ctrm');
-        const dbPath = path.join(ctrmDir, 'truths.db');
-
-        if (!fs.existsSync(ctrmDir) || !fs.existsSync(dbPath)) {
-            console.error(`❌ Error: Not a CTRM project. Run 'ctrm init <projectName>' first or run this command from within a CTRM project directory.`);
-            process.exit(1);
-        }
+        const dbPath = getDbPath(options.projectPath);
 
         console.log('════════════════════════════════════════════════════════════');
         console.log(`✨ Refining truth with ID: "${truthId}"`);
@@ -310,12 +302,21 @@ program
     });
 
 
-function getDbPath(): string {
-    const currentDir = process.cwd();
-    const ctrmDir = path.join(currentDir, '.ctrm');
+function getDbPath(projectPath?: string): string {
+    console.log(`[getDbPath Debug] Received projectPath: ${projectPath}`);
+    const baseDir = projectPath ? path.resolve(projectPath) : process.cwd();
+    console.log(`[getDbPath Debug] Resolved baseDir: ${baseDir}`);
+    const ctrmDir = path.join(baseDir, '.ctrm');
+    console.log(`[getDbPath Debug] Resolved ctrmDir: ${ctrmDir}`);
     const dbPath = path.join(ctrmDir, 'truths.db');
+    console.log(`[getDbPath Debug] Resolved dbPath: ${dbPath}`);
 
-    if (!fs.existsSync(ctrmDir) || !fs.existsSync(dbPath)) {
+    const ctrmDirExists = fs.existsSync(ctrmDir);
+    const dbPathExists = fs.existsSync(dbPath);
+    console.log(`[getDbPath Debug] ctrmDir exists: ${ctrmDirExists}`);
+    console.log(`[getDbPath Debug] dbPath exists: ${dbPathExists}`);
+
+    if (!ctrmDirExists || !dbPathExists) {
         console.error(`❌ Error: Not a CTRM project. Run 'ctrm init <projectName>' first or run this command from within a CTRM project directory.`);
         process.exit(1);
     }
@@ -332,8 +333,9 @@ program
   .description('Run one improvement cycle on low-confidence claims')
   .option('-n, --num <count>', 'Number of claims to improve', '3')
   .option('-v, --vector-isa', 'Use Vector ISA programs instead of direct LLM calls', false)
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const dbPath = getDbPath();
+    const dbPath = getDbPath(options.projectPath);
     const tms = new TruthManagementSystem(dbPath);
     const llmService = new LlmService(tms);
     const executor = new VectorExecutor();
@@ -452,8 +454,9 @@ program
   .description('Let CTRM discover new truths about itself')
   .option('-t, --topic <topic>', 'Topic to explore', 'system architecture')
   .option('-v, --vector-isa', 'Use Vector ISA programs instead of direct LLM calls', false)
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const dbPath = getDbPath();
+    const dbPath = getDbPath(options.projectPath);
     const tms = new TruthManagementSystem(dbPath);
     const llmService = new LlmService(tms);
     const executor = new VectorExecutor();
@@ -581,8 +584,9 @@ program
   .description('Verify existing claims against each other')
   .option('-a, --all', 'Verify all claims', false)
   .option('-v, --vector-isa', 'Use Vector ISA programs instead of direct LLM calls', false)
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const dbPath = getDbPath();
+    const dbPath = getDbPath(options.projectPath);
     const tms = new TruthManagementSystem(dbPath);
     const llmService = new LlmService(tms);
     const executor = new VectorExecutor();
@@ -744,8 +748,9 @@ Respond in JSON:
 program
   .command('meta-learn')
   .description('Analyze improvement patterns and optimize learning')
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const dbPath = getDbPath();
+    const dbPath = getDbPath(options.projectPath);
     const tms = new TruthManagementSystem(dbPath);
     const llmService = new LlmService(tms);
     
@@ -782,288 +787,68 @@ Respond with specific, actionable recommendations.`;
 
 program
   .command('daemon')
-  .description('Run continuous improvement daemon')
+  .description('Run continuous improvement daemon with Three-Mind Architecture')
   .option('-c, --cycle-time <seconds>', 'Seconds between cycles', '300')
   .option('-m, --max-iterations <number>', 'Max iterations (0=infinite)', '0')
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
+  .option('--ml-training-interval <milliseconds>', 'Interval for ML training cycles in milliseconds', '60000') // New option
+  .option('--ml-training-max-cycles <number>', 'Max ML training cycles (0 for infinite)', '0') // New option
   .action(async (options) => {
+    console.log('[Daemon Command Debug] Options:', options);
     let iteration = 0;
     const maxIter = parseInt(options.maxIterations);
-    const cycleTime = parseInt(options.cycleTime) * 1000;
+    const cycleTime = parseInt(options.cycleTime) * 1000; // Convert to milliseconds
+    const mlTrainingIntervalMs = parseInt(options.mlTrainingInterval); // Parse new option
+    const mlTrainingMaxCycles = parseInt(options.mlTrainingMaxCycles); // Parse new option
+
+    const dbPath = getDbPath(options.projectPath);
+    const tms = new TruthManagementSystem(dbPath);
+    const llmService = new LlmService(tms);
+    const internalLLM = new InternalLLM(tms);
+    const orchestra = new DualLlmOrchestra(tms, internalLLM, llmService);
+
+    // Initial check/ensure Truth 000
+    tms.ensureTruth000();
+
+    // Start the orchestra (which includes starting the ML Training Daemon)
+    // Pass the ML training configuration to the orchestra's start method
+    await orchestra.start(mlTrainingIntervalMs, mlTrainingMaxCycles);
 
     while (maxIter === 0 || iteration < maxIter) {
       iteration++;
       console.log(`\n${'═'.repeat(60)}`);
-      console.log(`🔄 Improvement Daemon - Iteration ${iteration}`);
+      console.log(`🧠 Three-Mind Daemon - Cycle ${iteration}`);
       console.log(`${'═'.repeat(60)}\n`);
 
-      // Phase 1: Improve low-confidence claims
-      console.log('Phase 1: Autonomous Refinement');
-      await runImprove(3);
+      try {
+        // Run a full discovery cycle
+        console.log('Orchestrating Discovery Cycle...');
+        await orchestra.runDiscoveryCycle();
+        console.log('Discovery Cycle completed.');
 
-      // Phase 2: Discover new truths
-      console.log('\nPhase 2: Truth Discovery');
-      await runDiscover('system optimization');
+        // Run a self-improvement cycle periodically (e.g., every 5 cycles)
+        if (iteration % 5 === 0) {
+          console.log('\nOrchestrating Self-Improvement Cycle...');
+          await orchestra.runSelfImprovementCycle();
+          console.log('Self-Improvement Cycle completed.');
+        }
 
-      // Phase 3: Verify claims
-      console.log('\nPhase 3: Claim Verification');
-      await runVerify(false); // Non-foundational only
+        console.log(`\n✅ Cycle complete: Iteration ${iteration}`);
+      } catch (error) {
+        console.error(`\n❌ Error during daemon cycle ${iteration}:`, error);
+        // The DaemonManager will handle restarts based on this process exiting with an error
+        process.exit(1);
+      }
 
-      // Phase 4: Meta-learning (every 5 iterations)
-      if (iteration % 5 === 0) {
-        console.log('\nPhase 4: Meta-Learning');
-        await runMetaLearn();
+      if (maxIter !== 0 && iteration >= maxIter) {
+        console.log(`\nDaemon reached max iterations (${maxIter}). Shutting down.`);
+        break;
       }
 
       await sleep(cycleTime);
     }
+    console.log('\nDaemon gracefully stopped.');
   });
-
-// Helper functions for daemon operations
-async function runImprove(count: number): Promise<void> {
-  const dbPath = getDbPath();
-  const tms = new TruthManagementSystem(dbPath);
-  const llmService = new LlmService(tms);
-
-  const allClaims = tms.getAllClaims();
-  const lowConfidence = allClaims
-    .filter(c => c.distance_from_center > 10 && c.confidence < 0.85)
-    .sort((a, b) => a.confidence - b.confidence)
-    .slice(0, count);
-
-  console.log(`\n🔧 Improving ${lowConfidence.length} low-confidence claims\n`);
-
-  for (const claim of lowConfidence) {
-    console.log(`📝 ${claim.subject}: ${claim.claim}`);
-    console.log(`   Current confidence: ${claim.confidence}\n`);
-
-    const result = await llmService.refineTruth(
-      claim,
-      'Increase the precision and confidence of this claim while maintaining accuracy'
-    );
-
-    if (result) {
-      const updated = tms.updateClaim(
-        claim.id,
-        claim.agent,
-        result.newSubject || claim.subject,
-        result.claim || claim.claim,
-        result.confidence || claim.confidence,
-        result.newDistanceFromCenter || claim.distance_from_center,
-        claim.requires_verification,
-        claim.derives_from,
-        result.reason || claim.reason,
-        claim.immutable,
-        claim.importance,
-        claim.verification_count,
-        claim.failure_count,
-        claim.metadata
-      );
-
-      if (updated) {
-        console.log(`   ✅ Refined: ${result.claim}`);
-        console.log(`   New confidence: ${result.confidence}\n`);
-      } else {
-        console.log(`   ⚠️ Failed to update refined claim in TMS.\n`);
-      }
-    } else {
-      console.log(`   ❌ LLM returned no refinement data for ${claim.id}.\n`);
-    }
-  }
-}
-
-async function runDiscover(topic: string): Promise<void> {
-  const dbPath = getDbPath();
-  const tms = new TruthManagementSystem(dbPath);
-  const llmService = new LlmService(tms);
-
-  console.log('\n🔍 Starting Truth Discovery\n');
-
-  // Ask LLM to analyze the current truth base and discover patterns
-  const prompt = `Analyze the current CTRM truth base and discover new truths about "${topic}".
-
-Instructions:
-1. Look for patterns across existing claims
-2. Identify implicit assumptions that should be made explicit
-3. Find relationships between claims that should be documented
-4. Suggest new truths that would strengthen the system
-
-Format your response as:
-{
-  "discoveries": [
-    {
-      "claim": "The new truth statement",
-      "subject": "Category",
-      "confidence": 0.85,
-      "distance_from_center": 30,
-      "reasoning": "Why this is true based on existing claims"
-    }
-  ]
-}`;
-
-  try {
-    const discoveries = await llmService.discoverTruths(prompt);
-
-    console.log(`\n💡 Discovered ${discoveries.length} new truths:\n`);
-
-    for (const discovery of discoveries) {
-      console.log(`📝 ${discovery.subject}: ${discovery.claim}`);
-      console.log(`   Confidence: ${discovery.confidence}`);
-      console.log(`   Reasoning: ${discovery.reasoning}\n`);
-
-      // Ask user to approve before adding
-      // In autonomous mode, could auto-accept high confidence discoveries
-      if (discovery.confidence >= 0.85) {
-        // Auto-accept high confidence
-        tms.proposeClaim({
-          agent: 'CTRM_Discovery',
-          subject: discovery.subject,
-          claim: discovery.claim,
-          confidence: discovery.confidence,
-          distance_from_center: discovery.distance_from_center,
-          // Assuming default values for other properties as in proposeClaim
-          requires_verification: true
-        });
-        console.log('   ✅ Auto-accepted (high confidence)\n');
-      } else {
-        console.log('   ⏸️  Needs manual review (medium confidence)\n');
-      }
-    }
-
-  } catch (error) {
-    if (error instanceof Error) {
-      console.error('❌ Discovery failed:', error.message);
-    } else {
-      console.error('❌ An unknown error occurred during discovery.');
-    }
-  }
-}
-
-async function runVerify(foundational: boolean): Promise<void> {
-  const dbPath = getDbPath();
-  const tms = new TruthManagementSystem(dbPath);
-  const llmService = new LlmService(tms);
-
-  console.log('\n🔬 Starting Claim Verification\n');
-
-  const claimsToVerify = foundational
-    ? tms.getAllClaims()
-    : tms.getAllClaims().filter(c => c.distance_from_center > 10); // Skip foundational
-
-  console.log(`Verifying ${claimsToVerify.length} claims...\n`);
-
-  for (const claim of claimsToVerify) {
-    // Skip immutable claims from verification
-    if (claim.immutable) {
-      console.log(`⏩ Skipping immutable claim: ${claim.id}\n`);
-      continue;
-    }
-
-    console.log(`🔍 Verifying: ${claim.subject}`);
-    console.log(`   Claim: "${claim.claim}"\n`);
-
-    // Ask LLM to verify against all other truths
-    const prompt = `Verify this claim against all existing truths in the system:
-
-Claim: "${claim.claim}"
-
-Questions:
-1. Does this claim contradict any existing truths?
-2. What is your confidence this claim is accurate? (0.0-1.0)
-3. What evidence supports or refutes it?
-4. Should confidence be adjusted?
-
-Respond in JSON:
-{
-  "contradictions": ["list of contradicting claim IDs"],
-  "verification_confidence": 0.85,
-  "evidence": "Supporting evidence from truth base",
-  "recommended_confidence": 0.80,
-  "reasoning": "Why this confidence is appropriate"
-}`;
-
-    try {
-      const verification = await llmService.verifyClaim(claim, prompt);
-      
-      if (verification.contradictions.length > 0) {
-        console.log(`   ⚠️  Contradictions found with:`);
-        verification.contradictions.forEach(id => console.log(`      - ${id}`));
-      }
-      
-      console.log(`   Verification confidence: ${verification.verification_confidence}`);
-      console.log(`   Recommended confidence: ${verification.recommended_confidence}`);
-      
-      // Update confidence if needed
-      if (Math.abs(claim.confidence - verification.recommended_confidence) > 0.05) { // Use a small threshold
-        console.log(`   📊 Updating confidence: ${claim.confidence.toFixed(2)} → ${verification.recommended_confidence.toFixed(2)}`);
-        tms.updateClaim(
-          claim.id,
-          claim.agent,
-          claim.subject,
-          claim.claim,
-          verification.recommended_confidence, // Update with recommended confidence
-          claim.distance_from_center,
-          claim.requires_verification,
-          claim.derives_from,
-          verification.reasoning, // Update reason with verification reasoning
-          claim.immutable,
-          claim.importance,
-          (claim.verification_count || 0) + 1, // Increment verification count
-          claim.failure_count,
-          claim.metadata
-        );
-      } else {
-          console.log(`   ✅ Confidence within acceptable range. No update needed.`);
-      }
-      
-      console.log();
-      
-    } catch (error) {
-      if (error instanceof Error) {
-          console.log(`   ❌ Verification failed: ${error.message}\n`);
-      } else {
-          console.log(`   ❌ An unknown error occurred during verification.\n`);
-      }
-    }
-  }
-
-  console.log('✅ Verification complete\n');
-}
-
-async function runMetaLearn(): Promise<void> {
-  const dbPath = getDbPath();
-  const tms = new TruthManagementSystem(dbPath);
-  const llmService = new LlmService(tms);
-
-  console.log('\n🧠 Starting Meta-Learning Analysis\n');
-
-  // Analyze the history of improvements
-  const prompt = `Analyze the history of claim refinements and verifications in this system and identify:
-
-1. What types of refinements improve confidence most?
-2. What patterns lead to successful claims?
-3. What subjects need more coverage?
-4. What distance ranges are underutilized?
-5. How should the improvement strategy be adjusted?
-
-Respond with specific, actionable recommendations.`;
-
-  try {
-    const result = await llmService.metaLearn(prompt);
-
-    console.log(`\n💡 Meta-Learning Recommendations:\n`);
-    result.recommendations.forEach((rec, index) => {
-      console.log(`${index + 1}. ${rec}\n`);
-    });
-
-  } catch (error) {
-    if (error instanceof Error) {
-      console.error('❌ Meta-Learning failed:', error.message);
-    } else {
-      console.error('❌ An unknown error occurred during meta-learning.');
-    }
-  }
-  console.log('✅ Meta-Learning complete\n');
-}
 
 program
   .command('list')
@@ -1071,8 +856,9 @@ program
   .option('-s, --subject <subject>', 'Filter by subject')
   .option('-d, --distance <range>', 'Filter by distance (e.g., "0-10")')
   .option('-c, --confidence <min>', 'Filter by minimum confidence')
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const tms = new TruthManagementSystem(getDbPath());
+    const tms = new TruthManagementSystem(getDbPath(options.projectPath));
     let claims = tms.getAllClaims();
 
     // Apply filters
@@ -1105,8 +891,9 @@ program
 program
   .command('status')
   .description('Show system health metrics')
-  .action(async () => {
-    const tms = new TruthManagementSystem(getDbPath());
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
+  .action(async (options) => {
+    const tms = new TruthManagementSystem(getDbPath(options.projectPath));
     const claims = tms.getAllClaims();
 
     const stats = {
@@ -1153,13 +940,14 @@ program
   .description('Learn Vector ISA opcodes through experimentation')
   .option('-d, --document <path>', 'Path to Vector ISA spec')
   .option('-i, --iterations <number>', 'Number of experimentation iterations', '5')
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const tms = new TruthManagementSystem(getDbPath());
+    const tms = new TruthManagementSystem(getDbPath(options.projectPath));
     const llmService = new LlmService(tms);
 
     // 1. Ingest the Vector ISA document
     console.log('📚 Ingesting Vector ISA specification...\n');
-    await _ingestDocument(options.document, tms, llmService);
+    await _ingestDocument(options.document, tms, llmService, options.projectPath);
 
     // 2. Discover opcodes through experimentation
     console.log('🔬 Discovering opcodes through experimentation...\n');
@@ -1220,8 +1008,9 @@ program
   .command('generate-program')
   .description('Generate and execute a Vector ISA program for a given task')
   .requiredOption('-t, --task <description>', 'Task to accomplish')
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
   .action(async (options) => {
-    const dbPath = getDbPath();
+    const dbPath = getDbPath(options.projectPath);
     const tms = new TruthManagementSystem(dbPath);
     const llmService = new LlmService(tms);
     const executor = new VectorExecutor(); // Initialize with no LanceDB connection for now
@@ -1271,6 +1060,93 @@ Example Program Structure:
     console.log('🚀 Executing generated Vector ISA program...\n');
     const result = await executor.execute(programJson);
     console.log('\n✅ Program result:', JSON.stringify(result, null, 2));
+  });
+
+program
+  .command('test-gemini')
+  .description('Test Gemini CLI integration with token usage monitoring')
+  .option('-t, --task <taskType>', 'Type of task to test (pattern_analysis, complex_verification, architectural)', 'pattern_analysis')
+  .option('-d, --description <description>', 'Description for the task', 'system architecture patterns')
+  .option('-P, --project-path <path>', 'Specify the root path of the CTRM project to manage')
+  .action(async (options) => {
+    const dbPath = getDbPath(options.projectPath);
+    const tms = new TruthManagementSystem(dbPath);
+    const internalLLM = new InternalLLM(tms);
+    const llmService = new LlmService(tms);
+    const geminiCliService = new GeminiCliService(tms);
+    const orchestra = new DualLlmOrchestra(tms, internalLLM, llmService);
+
+    console.log('\n🧪 Testing Gemini CLI Integration\n');
+
+    try {
+      let result;
+      switch (options.task) {
+        case 'pattern_analysis':
+          console.log('🔍 Running pattern analysis...');
+          result = await geminiCliService.analyzeCodebasePattern(options.description);
+          console.log(`\n💡 Analysis Result:`);
+          console.log(`   Confidence: ${result.confidence.toFixed(2)}`);
+          console.log(`   Token Usage: ${result.tokenUsage}`);
+          console.log(`   Recommendations: ${result.recommendations.length}`);
+          result.recommendations.forEach((rec: string, i: number) => console.log(`     ${i+1}. ${rec}`));
+          break;
+
+        case 'complex_verification':
+          // Create a test claim for verification
+          const testClaim: TruthClaim = {
+            id: 'TEST_CLAIM',
+            agent: 'TestAgent',
+            subject: 'System Architecture',
+            claim: options.description || 'The system should implement modular architecture for better maintainability',
+            confidence: 0.7,
+            distance_from_center: 30,
+            requires_verification: true,
+            timestamp: new Date().toISOString()
+          };
+
+          console.log('🔍 Running complex claim verification...');
+          result = await geminiCliService.verifyComplexClaim(testClaim, 'architectural best practices');
+          console.log(`\n💡 Verification Result:`);
+          console.log(`   External Confidence: ${result.external_verification_confidence.toFixed(2)}`);
+          console.log(`   Token Usage: ${result.tokenUsage}`);
+          console.log(`   Contradictions: ${result.external_contradictions.length}`);
+          console.log(`   Evidence: ${result.external_evidence}`);
+          break;
+
+        case 'architectural':
+          console.log('🔍 Running architectural recommendations...');
+          result = await geminiCliService.generateArchitecturalRecommendations(
+            options.description,
+            ['improving system performance', 'enhancing modularity']
+          );
+          console.log(`\n💡 Architectural Recommendations:`);
+          console.log(`   Token Usage: ${result.tokenUsage}`);
+          console.log(`   Recommendations: ${result.recommendations.length}`);
+          result.recommendations.forEach((rec: any, i: number) => {
+            console.log(`     ${i+1}. ${rec.recommendation}`);
+            console.log(`        Impact: ${rec.impact}, Complexity: ${rec.implementation_complexity}`);
+          });
+          console.log(`   Strategic Insights: ${result.strategic_insights.length}`);
+          result.strategic_insights.forEach((insight: string, i: number) => console.log(`     ${i+1}. ${insight}`));
+          break;
+
+        default:
+          console.log('❌ Unknown task type');
+          return;
+      }
+
+      // Show Gemini CLI usage statistics
+      const stats = orchestra.getGeminiCliUsageStats();
+      console.log(`\n📊 Gemini CLI Usage Statistics:`);
+      console.log(`   Total Tokens Used: ${stats.totalTokensUsed}`);
+      console.log(`   Total Requests: ${stats.totalRequests}`);
+      console.log(`   Last Request Tokens: ${stats.lastRequestTokens}`);
+
+    } catch (error) {
+      console.error('❌ Error during Gemini CLI test:', error);
+    }
+
+    console.log('\n✅ Gemini CLI Integration Test Complete\n');
   });
 
 program.parse(process.argv);

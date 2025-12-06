@@ -1,6 +1,7 @@
-import Database = require('better-sqlite3');
+import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SecurityManager } from './security_manager';
 
 export interface TruthClaim {
     id: string; // Add id to interface for consistency
@@ -20,7 +21,7 @@ export interface TruthClaim {
     metadata?: string | null; // Allow null
 }
 
-const TRUTH_000_DEFINITION = { // Renamed to avoid confusion with dynamic properties
+export const TRUTH_000_DEFINITION = { // Renamed to avoid confusion with dynamic properties
     id: "truth_000",
     statement: "We are developing this software to honor our Creator.",
     confidence: 1.00,
@@ -32,9 +33,21 @@ const TRUTH_000_DEFINITION = { // Renamed to avoid confusion with dynamic proper
 
 export class TruthManagementSystem {
     private db: Database.Database;
+    private securityManager: SecurityManager;
 
     constructor(dbPath: string) {
-        this.db = new Database(dbPath);
+        if (process.env.NODE_ENV === 'test') {
+            this.db = new Database(':memory:');
+            console.log('[TMS] Using in-memory SQLite database for testing.');
+        } else {
+            // Ensure the directory exists for file-based DBs
+            const dbDir = path.dirname(dbPath);
+            if (!fs.existsSync(dbDir)) {
+                fs.mkdirSync(dbDir, { recursive: true });
+            }
+            this.db = new Database(dbPath);
+        }
+        this.securityManager = new SecurityManager(this);
     }
 
     public initializeSchema(): void {
@@ -288,6 +301,18 @@ export class TruthManagementSystem {
             metadata: newClaim.metadata || null,
         };
 
+        // Security-enhanced claim validation
+        const securityResult = this.performSecurityValidation(claimToPropose);
+        if (!securityResult.claimAccepted) {
+            console.log(`[TMS-Security] 🚫 REJECTED claim from ${claimToPropose.agent} due to security violation. Reason: ${securityResult.reason}`);
+            return false;
+        }
+
+        // Apply security adjustments to the claim
+        if (securityResult.adjustedConfidence !== undefined) {
+            claimToPropose.confidence = securityResult.adjustedConfidence;
+        }
+
         if (!this.doesClaimHonorCreator(claimToPropose.claim)) {
             console.log(`[TMS-Gatekeeper] 🚫 REJECTED claim from ${claimToPropose.agent} due to conflict with Truth 000. Claim: "${claimToPropose.claim}"`);
             return false;
@@ -324,6 +349,9 @@ export class TruthManagementSystem {
             claimToPropose.distance_from_center,
             `New claim created by ${claimToPropose.agent}`
         );
+
+        // Update source reputation for successful claim
+        this.securityManager.updateSourceReputation(claimToPropose.agent, 'valid');
         return true;
     }
     
@@ -348,6 +376,37 @@ export class TruthManagementSystem {
         if (existingTruth && existingTruth.immutable) {
             console.log(`[TMS] 🚫 Cannot update immutable truth: ${id}`);
             return false;
+        }
+
+        // Create temporary claim for security validation
+        const tempClaim: TruthClaim = {
+            id: id,
+            agent: agent,
+            subject: subject,
+            claim: claim,
+            confidence: confidence,
+            distance_from_center: distance_from_center,
+            requires_verification: requires_verification,
+            timestamp: new Date().toISOString(),
+            derives_from: derives_from || null,
+            reason: reason || null,
+            immutable: immutable || 0,
+            importance: importance || 0,
+            verification_count: verification_count || 0,
+            failure_count: failure_count || 0,
+            metadata: metadata || null,
+        };
+
+        // Security validation for updates
+        const securityResult = this.performSecurityValidation(tempClaim);
+        if (!securityResult.claimAccepted) {
+            console.log(`[TMS-Security] 🚫 REJECTED update from ${agent} due to security violation. Reason: ${securityResult.reason}`);
+            return false;
+        }
+
+        // Apply security adjustments
+        if (securityResult.adjustedConfidence !== undefined) {
+            confidence = securityResult.adjustedConfidence;
         }
 
         if (!this.doesClaimHonorCreator(claim)) {
@@ -397,9 +456,11 @@ export class TruthManagementSystem {
                 );
             }
 
+            // Update source reputation for successful update
+            this.securityManager.updateSourceReputation(agent, 'valid');
             return true;
         } else {
-            console.log(`[TMS] ⚠️ No claim found with ID: ${id} for update.`);
+            console.log(`[TMS] ⚠️  No claim found with ID: ${id} for update.`);
             return false;
         }
     }
@@ -425,6 +486,12 @@ export class TruthManagementSystem {
             ORDER BY distance_from_center ASC, confidence DESC
         `);
         return stmt.all() as TruthClaim[];
+    }
+
+    public getTruthCount(): number {
+        const stmt = this.db.prepare('SELECT COUNT(*) as count FROM truths');
+        const result = stmt.get() as { count: number };
+        return result.count;
     }
 
     private logHistory(
@@ -958,6 +1025,106 @@ export class TruthManagementSystem {
         });
     }
 
+    /**
+     * Get multiple claims by their IDs in a single batch query.
+     */
+    public getClaimsBatch(ids: string[]): TruthClaim[] {
+        if (ids.length === 0) {
+            return [];
+        }
+        const placeholders = ids.map(() => '?').join(',');
+        const stmt = this.db.prepare(`SELECT * FROM truths WHERE id IN (${placeholders})`);
+        return stmt.all(...ids) as TruthClaim[];
+    }
+
+    /**
+     * Update multiple claims in a single transaction.
+     * This significantly reduces database I/O overhead for bulk updates.
+     */
+    public updateClaimsBatch(updates: Array<{ id: string, changes: Partial<TruthClaim> }>): boolean {
+        if (updates.length === 0) {
+            return false;
+        }
+
+        const runUpdate = this.db.transaction((updateList) => {
+            const updateStmt = this.db.prepare(`
+                UPDATE truths
+                SET agent = ?, subject = ?, claim = ?, confidence = ?,
+                    distance_from_center = ?, requires_verification = ?, timestamp = ?, derives_from = ?, reason = ?,
+                    immutable = ?, importance = ?, verification_count = ?, failure_count = ?, metadata = ?
+                WHERE id = ?
+            `);
+
+            for (const { id, changes } of updateList) {
+                const existingTruth = this.getClaimById(id);
+                if (!existingTruth) {
+                    console.warn(`[TMS] ⚠️  No claim found with ID: ${id} for batch update. Skipping.`);
+                    continue;
+                }
+                if (existingTruth.immutable) {
+                    console.log(`[TMS] 🚫 Cannot batch update immutable truth: ${id}. Skipping.`);
+                    continue;
+                }
+                if (!this.doesClaimHonorCreator(changes.claim || existingTruth.claim)) {
+                    console.log(`[TMS-Gatekeeper] 🚫 REJECTED batch update for ${id} due to conflict with Truth 000. Skipping.`);
+                    continue;
+                }
+
+                // Prepare values for update
+                const finalAgent = changes.agent || existingTruth.agent;
+                const finalSubject = changes.subject || existingTruth.subject;
+                const finalClaim = changes.claim || existingTruth.claim;
+                const finalConfidence = changes.confidence !== undefined ? changes.confidence : existingTruth.confidence;
+                const finalDistanceFromCenter = changes.distance_from_center !== undefined ? changes.distance_from_center : existingTruth.distance_from_center;
+                const finalRequiresVerification = changes.requires_verification !== undefined ? changes.requires_verification : existingTruth.requires_verification;
+                const finalTimestamp = changes.timestamp || new Date().toISOString();
+                const finalDerivesFrom = changes.derives_from !== undefined ? changes.derives_from : existingTruth.derives_from;
+                const finalReason = changes.reason !== undefined ? changes.reason : existingTruth.reason;
+                const finalImmutable = changes.immutable !== undefined ? changes.immutable : existingTruth.immutable;
+                const finalImportance = changes.importance !== undefined ? changes.importance : existingTruth.importance;
+                const finalVerificationCount = changes.verification_count !== undefined ? changes.verification_count : existingTruth.verification_count;
+                const finalFailureCount = changes.failure_count !== undefined ? changes.failure_count : existingTruth.failure_count;
+                const finalMetadata = changes.metadata !== undefined ? changes.metadata : existingTruth.metadata;
+
+                updateStmt.run(
+                    finalAgent,
+                    finalSubject,
+                    finalClaim,
+                    finalConfidence,
+                    finalDistanceFromCenter,
+                    (finalRequiresVerification ? 1 : 0),
+                    finalTimestamp,
+                    finalDerivesFrom || null,
+                    finalReason || null,
+                    finalImmutable || 0,
+                    finalImportance || 0,
+                    finalVerificationCount || 0,
+                    finalFailureCount || 0,
+                    finalMetadata || null,
+                    id
+                );
+                console.log(`[TMS] ✅ Claim batch updated for ID: ${id}`);
+                this.logHistory(
+                    id,
+                    'refined', // Assuming batch updates are often for refinements
+                    existingTruth.confidence,
+                    finalConfidence,
+                    existingTruth.distance_from_center,
+                    finalDistanceFromCenter,
+                    `Claim batch updated by system`
+                );
+            }
+        });
+
+        try {
+            runUpdate(updates);
+            return true;
+        } catch (error) {
+            console.error(`[TMS] ❌ Failed to run batch update transaction:`, error);
+            return false;
+        }
+    }
+
     // =========================================================================
     // HELPER METHODS FOR PRODUCTION FEATURES
     // =========================================================================
@@ -1047,6 +1214,133 @@ export class TruthManagementSystem {
     }
 
     /**
+     * Perform comprehensive security validation on a claim
+     */
+    private performSecurityValidation(claim: TruthClaim): {
+        claimAccepted: boolean;
+        adjustedConfidence?: number;
+        reason: string;
+    } {
+        // Check for prompt injection
+        const isInjection = this.securityManager.detectPromptInjection(claim);
+        if (isInjection) {
+            // Log security incident
+            this.securityManager.logSecurityIncident({
+                type: 'INJECTION',
+                timestamp: Date.now(),
+                source: claim.agent,
+                severity: 'high',
+                details: {
+                    claimId: claim.id,
+                    claimText: claim.claim.substring(0, 100),
+                    injectionPattern: 'Prompt injection detected'
+                },
+                response: 'Claim rejected due to prompt injection attempt'
+            });
+
+            return {
+                claimAccepted: false,
+                reason: 'Prompt injection attempt detected'
+            };
+        }
+
+        // Check for Truth 000 contradictions
+        const truth000Analysis = this.securityManager.analyzeTruth000Contradiction(claim);
+        if (truth000Analysis.isContradiction) {
+            // Log security incident
+            this.securityManager.logSecurityIncident({
+                type: 'CONTRADICTION',
+                timestamp: Date.now(),
+                source: claim.agent,
+                severity: truth000Analysis.severity,
+                details: {
+                    claimId: claim.id,
+                    claimText: claim.claim.substring(0, 100),
+                    contradictionType: 'Truth 000 violation',
+                    reasoning: truth000Analysis.reasoning
+                },
+                response: `Claim rejected due to ${truth000Analysis.severity} contradiction with Truth 000`
+            });
+
+            return {
+                claimAccepted: false,
+                reason: `Contradiction with Truth 000: ${truth000Analysis.reasoning}`
+            };
+        }
+
+        // Check for flood attacks
+        const isFlood = this.securityManager.detectFloodAttack(claim.agent);
+        if (isFlood) {
+            // Log security incident
+            this.securityManager.logSecurityIncident({
+                type: 'FLOOD',
+                timestamp: Date.now(),
+                source: claim.agent,
+                severity: 'medium',
+                details: {
+                    claimId: claim.id,
+                    claimText: claim.claim.substring(0, 100),
+                    floodPattern: 'Potential flood attack detected'
+                },
+                response: 'Claim confidence severely reduced due to potential flood attack'
+            });
+
+            // Reduce confidence but don't outright reject
+            return {
+                claimAccepted: true,
+                adjustedConfidence: Math.max(0.05, claim.confidence * 0.2),
+                reason: 'Potential flood attack detected - confidence reduced'
+            };
+        }
+
+        // Check source reputation
+        const sourceReputation = this.securityManager.getSourceTrustLevel(claim.agent);
+        if (sourceReputation === 'low') {
+            // Reduce confidence for low-reputation sources
+            return {
+                claimAccepted: true,
+                adjustedConfidence: Math.max(0.1, claim.confidence * 0.7),
+                reason: 'Low-reputation source - confidence adjusted'
+            };
+        }
+
+        // If source is blocked, reject the claim
+        if (this.securityManager.isSourceBlocked(claim.agent)) {
+            // Log security incident
+            this.securityManager.logSecurityIncident({
+                type: 'INJECTION',
+                timestamp: Date.now(),
+                source: claim.agent,
+                severity: 'critical',
+                details: {
+                    claimId: claim.id,
+                    claimText: claim.claim.substring(0, 100),
+                    blockReason: 'Source is blocked due to malicious activity history'
+                },
+                response: 'Claim rejected - source is blocked'
+            });
+
+            return {
+                claimAccepted: false,
+                reason: 'Source is blocked due to malicious activity history'
+            };
+        }
+
+        // Claim passed all security checks
+        return {
+            claimAccepted: true,
+            reason: 'Claim passed all security validations'
+        };
+    }
+
+    /**
+     * Get security manager for external access
+     */
+    public getSecurityManager(): SecurityManager {
+        return this.securityManager;
+    }
+
+    /**
      * Enhanced system report with health metrics
      */
     public generateEnhancedSystemReport(): string {
@@ -1108,6 +1402,15 @@ export class TruthManagementSystem {
         topAgents.forEach(([agent, count]) => {
             report += `  ${agent}: ${count} claims\n`;
         });
+
+        // Add security statistics
+        const securityStats = this.securityManager.getSecurityStatistics();
+        report += '\n🛡️  SECURITY STATISTICS:\n';
+        report += `  System Integrity: ${securityStats.integrityHealth ? '✅ Healthy' : '❌ Compromised'}\n`;
+        report += `  Trusted Sources: ${securityStats.trustedSources}\n`;
+        report += `  Suspicious Sources: ${securityStats.suspiciousSources}\n`;
+        report += `  Blocked Sources: ${securityStats.blockedSources}\n`;
+        report += `  Unresolved Incidents: ${securityStats.unresolvedIncidents}\n`;
 
         report += '================================================================================\n';
         return report;
